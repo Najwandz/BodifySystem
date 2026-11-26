@@ -61,8 +61,7 @@ class BodyEstimator:
     ) -> Tuple[float, float, float, bool]:
         """
         Mengukur tinggi kepala (px) dan batas atas-bawah tubuh asli langsung dari kombinasi
-        siluet (puncak kepala, lekukan leher/dagu, telapak kaki) dan multi-landmark wajah
-        tanpa distorsi world_3d maupun ketergantungan pada satu landmark kecil saja.
+        siluet dan multi-landmark MediaPipe Pose yang sudah dikalibrasi terhadap karakteristik BlazePose.
         """
         nose = lm_2d[0]
         y_eye = 0.5 * (lm_2d[2][1] + lm_2d[5][1])
@@ -84,19 +83,19 @@ class BodyEstimator:
             mask_head_top = float(head_roi_ys.min())
         else:
             ys_all = np.where(mask > 0)[0]
-            mask_head_top = float(ys_all.min()) if len(ys_all) > 0 else max(0.0, y_eye - 1.65 * eye_to_mouth_px)
+            mask_head_top = float(ys_all.min()) if len(ys_all) > 0 else max(0.0, y_eye - 1.75 * eye_to_mouth_px)
 
-        # 2. Kumpulkan jangkar kepala independen (bebas volume rambut/hijab & tahan jitter 1 landmark)
-        landmark_cues = [eye_to_mouth_px / 0.295]
+        # 2. Kumpulkan jangkar kepala independen (rasio dikalibrasi khusus untuk BlazePose)
+        landmark_cues = [eye_to_mouth_px / 0.278]
         if yaw_rad < np.radians(18.0):
             if lm_2d[7][2] > 0.5 and lm_2d[8][2] > 0.5:
                 ear_span_px = abs(lm_2d[7][0] - lm_2d[8][0]) / cos_yaw
                 if ear_span_px > 10.0:
-                    landmark_cues.append(ear_span_px / 0.655)
+                    landmark_cues.append(ear_span_px / 0.630)
             if lm_2d[2][2] > 0.5 and lm_2d[5][2] > 0.5:
                 ipd_px = abs(lm_2d[2][0] - lm_2d[5][0]) / cos_yaw
                 if ipd_px > 5.0:
-                    landmark_cues.append(ipd_px / 0.276)
+                    landmark_cues.append(ipd_px / 0.268)
 
         head_lm_ref = float(np.median(landmark_cues))
 
@@ -113,11 +112,11 @@ class BodyEstimator:
                 y_chin_cand = float(neck_y1 + chin_idx)
                 if 0.40 * head_lm_ref <= (y_chin_cand - y_eye) <= 0.64 * head_lm_ref:
                     y_chin_sil = y_chin_cand
-                    landmark_cues.append((y_chin_sil - y_eye) / 0.51)
+                    landmark_cues.append((y_chin_sil - y_eye) / 0.505)
 
         head_ref_clean = float(np.median(landmark_cues))
 
-        # Batas atas tengkorak (hanya memangkas volume rambut/hijab berlebih)
+        # Batas atas tengkorak (memangkas volume rambut/hijab berlebih)
         y_crown_skull = max(
             0.0,
             min(
@@ -130,7 +129,7 @@ class BodyEstimator:
         all_head_cues = list(landmark_cues)
         crown_to_mouth = y_mouth - y_crown_skull
         if crown_to_mouth > 12.0:
-            all_head_cues.append(crown_to_mouth / 0.785)
+            all_head_cues.append(crown_to_mouth / 0.770)
         if y_chin_sil is not None:
             crown_to_chin = y_chin_sil - y_crown_skull
             if crown_to_chin > 16.0:
@@ -179,8 +178,7 @@ class BodyEstimator:
     ) -> Tuple[float, float, float, bool]:
         """
         Mempertahankan skala lebar bahu/dada/pinggang yang sudah akurat, serta menghitung
-        tinggi badan real dari rasio proporsi 2D murni (kepala, tungkai/torso, bahu/kepala)
-        tanpa distorsi prior dewasa world_3d sehingga akurat dari anak (140–145 cm) hingga dewasa.
+        tinggi badan real dari rasio proporsi 2D murni yang sudah dikalibrasi BlazePose.
         """
         nose = lm_2d[0]
         y_eye = 0.5 * (lm_2d[2][1] + lm_2d[5][1])
@@ -206,7 +204,7 @@ class BodyEstimator:
         ankles_visible = lm_2d[27][2] > 0.45 and lm_2d[28][2] > 0.45
         y_head_top = min(mask_top, max(0.0, y_eye - 0.50 * head_h_px))
 
-        # 2. Estimasi tinggi badan real (invarian ukuran foto & bebas distorsi peregangan world_3d dewasa)
+        # 2. Estimasi tinggi badan real (invarian ukuran foto & bebas bias 170 cm / world_3d dewasa)
         head_real_px, y_head_tight, y_feet_tight, full_visible = BodyEstimator._measure_head_and_body_bounds(
             lm_2d, mask, yaw_rad=yaw_rad
         )
@@ -228,13 +226,13 @@ class BodyEstimator:
             sh_span_px = max(abs(lm_2d[11][0] - lm_2d[12][0]), 1.0)
             sh_head_ratio = (sh_span_px / cos_yaw) / head_real_px
 
-            # Kurva maturitas proporsi tubuh 2D murni (anak 140–148 cm -> dewasa mungil -> dewasa tinggi)
-            m_leg = float(np.clip((leg_torso_2d - 1.50) / (1.84 - 1.50), 0.0, 1.0))
+            # Kurva maturitas proporsi tubuh 2D murni (antropometri Indonesia anak 140 cm hingga dewasa 180+ cm)
+            m_leg = float(np.clip((leg_torso_2d - 1.48) / (1.82 - 1.48), 0.0, 1.0))
             m_sh = float(np.clip((sh_head_ratio - 1.32) / (1.76 - 1.32), 0.0, 1.0))
-            m_head = float(np.clip((n_heads - 6.70) / (7.85 - 6.70), 0.0, 1.0))
-            maturity = 0.55 * m_leg + 0.25 * m_sh + 0.20 * m_head
+            m_head = float(np.clip((n_heads - 6.75) / (7.80 - 6.75), 0.0, 1.0))
+            maturity = 0.60 * m_leg + 0.25 * m_sh + 0.15 * m_head
 
-            head_cm = 20.55 + 2.45 * maturity
+            head_cm = 20.40 + 2.35 * maturity
             inferred_h = round(float(np.clip(n_heads * head_cm, 115.0, 210.0)), 1)
             return scale, inferred_h, exact_body_px, True
 
@@ -242,7 +240,7 @@ class BodyEstimator:
         torso_px = max(y_hp - y_sh, 1.0)
         scale_torso = 49.5 / max(torso_px, 40.0)
         scale = float(np.median([scale_head, scale_neck, scale_torso]))
-        inferred_h = round(float(np.clip((torso_px / head_real_px) * 21.8 / 0.29, 130.0, 195.0)), 1)
+        inferred_h = round(float(np.clip((torso_px / head_real_px) * 21.5 / 0.295, 130.0, 195.0)), 1)
         return scale, inferred_h, 0.0, False
 
     @staticmethod
