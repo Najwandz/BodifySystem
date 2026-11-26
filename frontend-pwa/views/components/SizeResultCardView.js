@@ -4,8 +4,6 @@ export function renderSizeResultCard(data) {
   const pose = data.info_pose || {};
   const catatan = (sewa.catatan_penyesuaian || []).map((c) => `<li>${c}</li>`).join("");
 
-  const tinggiBadan = m.tinggi_badan ?? data.estimasi_tinggi_otomatis_cm;
-  const hasTinggi = typeof tinggiBadan === "number" && tinggiBadan > 0;
   const hasExtraMetrics = typeof m.lingkar_pinggul === "number" && m.lingkar_pinggul > 0;
 
   return `
@@ -19,15 +17,6 @@ export function renderSizeResultCard(data) {
           : ""
       }
       <div class="metric-grid">
-        ${
-          hasTinggi
-            ? `<div class="metric-box">
-                <div class="metric-label">Tinggi Badan</div>
-                <div class="metric-val">${tinggiBadan}</div>
-                <div class="metric-unit">cm</div>
-              </div>`
-            : ""
-        }
         <div class="metric-box">
           <div class="metric-label">Lebar Bahu</div>
           <div class="metric-val">${m.lebar_bahu}</div>

@@ -59,10 +59,6 @@ class BodyEstimator:
         mask: np.ndarray,
         yaw_rad: float = 0.0,
     ) -> Tuple[float, float, float, bool]:
-        """
-        Mengukur tinggi kepala (px) dan batas atas kepala hingga dasar telapak kaki di lantai
-        secara akurat dari kombinasi siluet dan multi-landmark wajah/kaki MediaPipe Pose.
-        """
         nose = lm_2d[0]
         y_eye = 0.5 * (lm_2d[2][1] + lm_2d[5][1])
         y_mouth = 0.5 * (lm_2d[9][1] + lm_2d[10][1])
@@ -75,7 +71,6 @@ class BodyEstimator:
         eye_to_mouth_px = max(y_mouth - y_eye, 1.0)
         sh_span_px = max(abs(lm_2d[11][0] - lm_2d[12][0]), eye_to_mouth_px * 3.0)
 
-        # 1. Cari puncak kepala hanya pada kolom wajah agar noise / tangan terangkat tidak mengganggu
         head_x_min = max(0, int(round(nose[0] - 0.45 * sh_span_px)))
         head_x_max = min(w_img, int(round(nose[0] + 0.45 * sh_span_px)))
         head_roi_ys = np.where(mask[:, head_x_min:head_x_max] > 0)[0]
@@ -85,7 +80,6 @@ class BodyEstimator:
             ys_all = np.where(mask > 0)[0]
             mask_head_top = float(ys_all.min()) if len(ys_all) > 0 else max(0.0, y_eye - 1.60 * eye_to_mouth_px)
 
-        # 2. Kumpulkan jangkar kepala independen (dikalibrasi ke proporsi tengkorak vertex-menton nyata)
         landmark_cues = [eye_to_mouth_px / 0.315]
         if yaw_rad < np.radians(18.0):
             if lm_2d[7][2] > 0.5 and lm_2d[8][2] > 0.5:
@@ -99,7 +93,6 @@ class BodyEstimator:
 
         head_lm_ref = float(np.median(landmark_cues))
 
-        # Deteksi batas dagu dari awal penyempitan leher pada siluet antara mulut dan bahu
         neck_y1 = int(np.clip(round(y_mouth + 0.10 * head_lm_ref), 0, h_img - 1))
         neck_y2 = int(np.clip(round(y_sh), neck_y1 + 1, h_img))
         y_chin_sil = None
@@ -116,7 +109,6 @@ class BodyEstimator:
 
         head_ref_clean = float(np.median(landmark_cues))
 
-        # Batas atas tengkorak (hanya memangkas volume rambut/hijab yang sangat tinggi)
         y_crown_skull = max(
             0.0,
             min(
@@ -125,7 +117,6 @@ class BodyEstimator:
             ),
         )
 
-        # Gabungkan jangkar siluet ber-SNR tinggi (puncak tengkorak ke mulut & dagu)
         all_head_cues = list(landmark_cues)
         crown_to_mouth = y_mouth - y_crown_skull
         if crown_to_mouth > 12.0:
@@ -155,7 +146,6 @@ class BodyEstimator:
             heels_visible = 29 in lm_2d and 30 in lm_2d and lm_2d[29][2] > 0.45 and lm_2d[30][2] > 0.45
             toes_visible = 31 in lm_2d and 32 in lm_2d and lm_2d[31][2] > 0.45 and lm_2d[32][2] > 0.45
 
-            # Tentukan dasar telapak kaki di lantai (tidak lagi memotong kaki di atas mata kaki)
             if heels_visible and toes_visible:
                 y_heel = 0.5 * (lm_2d[29][1] + lm_2d[30][1])
                 y_toe = 0.5 * (lm_2d[31][1] + lm_2d[32][1])
@@ -187,11 +177,6 @@ class BodyEstimator:
         yaw_rad: float = 0.0,
         pitch_rad: float = 0.0,
     ) -> Tuple[float, float, float, bool]:
-        """
-        Mempertahankan skala lebar bahu/dada/pinggang yang sudah akurat, serta menghitung
-        tinggi badan real dari rasio panjang tubuh penuh (kepala hingga dasar telapak kaki)
-        terhadap tinggi kepala tanpa bias threshold tungkai/torso.
-        """
         nose = lm_2d[0]
         y_eye = 0.5 * (lm_2d[2][1] + lm_2d[5][1])
         y_mouth = 0.5 * (lm_2d[9][1] + lm_2d[10][1])
@@ -214,7 +199,6 @@ class BodyEstimator:
         ankles_visible = lm_2d[27][2] > 0.45 and lm_2d[28][2] > 0.45
         y_head_top = min(mask_top, max(0.0, y_eye - 0.50 * head_h_px))
 
-        # 2. Estimasi tinggi badan real (puncak tengkorak hingga dasar telapak kaki di lantai)
         head_real_px, y_head_tight, y_feet_tight, full_visible = BodyEstimator._measure_head_and_body_bounds(
             lm_2d, mask, yaw_rad=yaw_rad
         )
@@ -228,19 +212,13 @@ class BodyEstimator:
             scale = 0.75 * scale_full + 0.25 * clamped_head
 
             exact_body_px = max(y_feet_tight - y_head_tight, 1.0)
-            n_heads = exact_body_px / head_real_px
-
-            # Tinggi kepala antropometrik nyata (22.5 cm untuk postur pendek/anak hingga 23.7 cm untuk dewasa tinggi)
-            maturity = float(np.clip((n_heads - 6.30) / (7.50 - 6.30), 0.0, 1.0))
-            head_cm = 22.5 + 1.2 * maturity
-            inferred_h = round(float(np.clip(n_heads * head_cm, 120.0, 210.0)), 1)
+            inferred_h = round(full_body_px * scale, 1)
             return scale, inferred_h, exact_body_px, True
 
-        # Jika foto setengah badan (pinggul ke atas)
         torso_px = max(y_hp - y_sh, 1.0)
         scale_torso = 49.5 / max(torso_px, 40.0)
         scale = float(np.median([scale_head, scale_neck, scale_torso]))
-        inferred_h = round(float(np.clip((torso_px / head_real_px) * 23.0 / 0.30, 130.0, 195.0)), 1)
+        inferred_h = round(float(np.clip((torso_px * scale) / 0.29, 150.0, 190.0)), 1)
         return scale, inferred_h, 0.0, False
 
     @staticmethod
@@ -308,11 +286,11 @@ class BodyEstimator:
         self,
         front_bgr: np.ndarray,
         measurements: Dict[str, float],
-        inferred_height_cm: float,
+        inferred_height_cm: float = 0.0,
         rekomendasi_ukuran: str = "-",
         pose_info: Optional[Dict] = None,
     ) -> np.ndarray:
-        """Menggambar garis ukur tinggi badan, ukuran baju, rekomendasi, dan panduan cara memfoto pada foto."""
+        """Menggambar garis ukur baju (Bahu, Dada, Pinggang), rekomendasi, dan panduan cara memfoto pada foto."""
         canvas = front_bgr.copy()
         h, w = canvas.shape[:2]
         scale_ui = max(h / 920.0, 0.55)
@@ -320,18 +298,8 @@ class BodyEstimator:
         font_scale = 0.56 * scale_ui
         small_scale = 0.46 * scale_ui
 
-        lm_raw, world_3d, mask_raw, _ = self.segmenter.extract_full(front_bgr)
-        yaw_rad, _ = self._estimate_pose_angles_3d(world_3d)
-
-        _, y_head_f, y_feet_f, ankles_visible = self._measure_head_and_body_bounds(
-            lm_raw, mask_raw, yaw_rad=yaw_rad
-        )
-        y_head_top = int(np.clip(round(y_head_f), 10, h - 20))
-        y_feet = int(np.clip(round(y_feet_f), y_head_top + 40, h - 12))
-
-        xs_all = np.where(mask_raw > 0)[1]
-        body_x_min = int(xs_all.min()) if len(xs_all) > 0 else int(min(lm_raw[11][0], lm_raw[12][0]))
-        body_x_max = int(xs_all.max()) if len(xs_all) > 0 else int(max(lm_raw[11][0], lm_raw[12][0]))
+        lm_raw, _, mask_raw, _ = self.segmenter.extract_full(front_bgr)
+        ankles_visible = lm_raw[27][2] > 0.45 and lm_raw[28][2] > 0.45
 
         def _slice_bounds(y_val: float, fallback_x1: float, fallback_x2: float) -> Tuple[int, int]:
             ry = int(np.clip(round(y_val), 0, h - 1))
@@ -350,32 +318,7 @@ class BodyEstimator:
         ch_x1, ch_x2 = _slice_bounds(y_chest, lm_raw[11][0], lm_raw[12][0])
         wa_x1, wa_x2 = _slice_bounds(y_waist, lm_raw[23][0], lm_raw[24][0])
 
-        # 1. Garis ukur vertikal Tinggi Badan (kepala sampai kaki)
-        margin_side = max(18, int(round(22 * scale_ui)))
-        if body_x_min > margin_side + 30:
-            x_height = max(16, body_x_min - margin_side)
-        else:
-            x_height = min(w - 16, body_x_max + margin_side)
-
-        color_height = (255, 229, 0)  # Cyan terang (BGR)
-        cap_half = max(10, int(round(12 * scale_ui)))
-        cv2.line(canvas, (x_height, y_head_top), (x_height, y_feet), color_height, line_thick, cv2.LINE_AA)
-        cv2.line(canvas, (x_height - cap_half, y_head_top), (x_height + cap_half, y_head_top), color_height, line_thick, cv2.LINE_AA)
-        cv2.line(canvas, (x_height - cap_half, y_feet), (x_height + cap_half, y_feet), color_height, line_thick, cv2.LINE_AA)
-
-        tinggi_val = measurements.get("tinggi_badan", inferred_height_cm)
-        y_mid_height = int(0.5 * (y_head_top + y_feet))
-        self._draw_label_box(
-            canvas,
-            f"Tinggi: {tinggi_val} cm",
-            x_height + 8 if x_height < w // 2 else x_height - int(190 * scale_ui),
-            y_mid_height,
-            font_scale,
-            line_thick,
-            border_color=color_height,
-        )
-
-        # 2. Garis ukur baju (Bahu, Dada, Pinggang)
+        # 1. Garis ukur baju (Bahu, Dada, Pinggang)
         garment_lines = [
             (int(round(y_sh)), sh_x1, sh_x2, f"Bahu: {measurements['lebar_bahu']} cm", (80, 220, 100)),
             (int(round(y_chest)), ch_x1, ch_x2, f"Dada: {measurements['lingkar_dada']} cm", (60, 185, 255)),
@@ -396,10 +339,10 @@ class BodyEstimator:
                 border_color=gcolor,
             )
 
-        # 3. Label Rekomendasi Ukuran di bagian atas foto
+        # 2. Label Rekomendasi Ukuran di bagian atas foto
         self._draw_label_box(
             canvas,
-            f"Rekomendasi: Size {rekomendasi_ukuran} | Tinggi {tinggi_val} cm",
+            f"Rekomendasi: Size {rekomendasi_ukuran}",
             12,
             int(34 * scale_ui),
             font_scale,
@@ -408,7 +351,7 @@ class BodyEstimator:
             border_color=(147, 197, 253),
         )
 
-        # 4. Teks contoh cara memfoto di bagian bawah foto agar sesuai rekomendasi
+        # 3. Teks contoh cara memfoto di bagian bawah foto agar sesuai rekomendasi
         full_ok = bool((pose_info or {}).get("seluruh_tubuh_terlihat", ankles_visible))
         if full_ok:
             guide_text = "Cara Foto: Kepala-kaki masuk frame, berdiri tegak, lengan lurus"
@@ -448,8 +391,6 @@ class BodyEstimator:
         if aruco_scale is not None:
             scale = aruco_scale
             scale_method = "ArUco Presisi Tinggi (±1–1.5 cm)"
-            if full_body_visible and full_body_px > 0:
-                inferred_height_cm = round(full_body_px * aruco_scale, 1)
         else:
             scale = scale_auto
             scale_method = "Otomatis Proporsi Vertikal & Kepala"
@@ -511,7 +452,6 @@ class BodyEstimator:
         circ_offset = CLOTHING_CIRCUMFERENCE_OFFSET_CM.get(cloth, 2.0)
 
         result = {
-            "tinggi_badan": round(inferred_height_cm, 1),
             "lebar_bahu": round(max(32.0, raw_bahu - sh_offset), 1),
             "lingkar_dada": round(max(72.0, raw_dada - circ_offset), 1),
             "lingkar_pinggang": round(max(58.0, raw_pinggang - circ_offset), 1),
@@ -524,8 +464,6 @@ class BodyEstimator:
             notes.append(f"miring {abs(roll_deg)}° diluruskan")
         if arms_crossed:
             notes.append("tangan bersedekap dikoreksi (luruskan lengan di samping untuk akurasi maksimal)")
-        if not full_body_visible:
-            notes.append("tampilkan seluruh badan dari kepala hingga kaki untuk akurasi tinggi badan")
 
         status_pose = "Tegak lurus" if not notes else " • ".join(notes).capitalize()
 
