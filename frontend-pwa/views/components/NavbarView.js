@@ -19,8 +19,6 @@ export function renderNavbar(activeRoute, onNavigate) {
   const items = [
     { id: "ukur", icon: "📷", label: "Ukur 1 Foto" },
     { id: "dashboard", icon: "📋", label: "Riwayat" },
-    { id: "katalog", icon: "👗", label: "Katalog Sewa" },
-    { id: "remote", icon: "🔗", label: "Ukur Mandiri" },
   ];
 
   nav.innerHTML = items

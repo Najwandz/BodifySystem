@@ -1,6 +1,7 @@
 from pathlib import Path
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from config.database import Base, SessionLocal, engine
@@ -50,6 +51,15 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def block_disabled_features(request: Request, call_next):
+    path = request.url.path.lower()
+    if path.startswith("/api/") and ("katalog" in path or "remote" in path):
+        return JSONResponse(status_code=404, content={"detail": "Fitur tidak tersedia."})
+    return await call_next(request)
+
 
 app.include_router(router)
 
