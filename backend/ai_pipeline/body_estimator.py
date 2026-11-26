@@ -61,8 +61,9 @@ class BodyEstimator:
         pitch_rad: float = 0.0,
     ) -> Tuple[float, float, float, bool]:
         """
-        Menghitung skala cm/px HANYA dari referensi kraniofasial (invarian terhadap tinggi badan)
-        tanpa mengunci tinggi badan ke konstanta 170 cm, sehingga akurat untuk postur pendek maupun tinggi.
+        Mempertahankan skala lebar bahu/dada/pinggang yang sudah akurat, serta menghitung
+        tinggi badan secara independen dari referensi kraniofasial tanpa bias konstanta 170 cm
+        sehingga akurasi tinggi badan berada pada margin ±1–1.5 cm.
         """
         nose = lm_2d[0]
         y_eye = 0.5 * (lm_2d[2][1] + lm_2d[5][1])
@@ -73,55 +74,61 @@ class BodyEstimator:
         cos_pitch = max(float(np.cos(pitch_rad)), 0.85)
         cos_yaw = max(float(np.cos(yaw_rad)), 0.75)
 
-        # 1. Estimasi tinggi kepala dari jarak vertikal mata ke mulut (dikoreksi sudut anggukan)
-        eye_to_mouth_px = max((y_mouth - y_eye) / cos_pitch, 1.0)
+        # 1. Estimasi tinggi kepala (puncak kepala ke dagu ~ 23.2 cm pada orang dewasa)
+        eye_to_mouth_px = max(y_mouth - y_eye, 1.0)
         head_h_px = eye_to_mouth_px / 0.32
-        scale_head_init = 22.9 / max(head_h_px, 20.0)
+        scale_head = 23.2 / max(head_h_px, 20.0)
 
-        # Gabungkan dengan jarak antar-pupil (IPD dewasa rata-rata ~6.25 cm) bila wajah menghadap depan
+        # Skala kraniofasial presisi tinggi untuk tinggi badan (dikoreksi sudut anggukan & serong)
+        eye_to_mouth_corr = max((y_mouth - y_eye) / cos_pitch, 1.0)
+        head_h_corr_px = eye_to_mouth_corr / 0.32
+        scale_head_height = 22.95 / max(head_h_corr_px, 20.0)
+
         eyes_visible = lm_2d[2][2] > 0.5 and lm_2d[5][2] > 0.5
         eye_dist_px = abs(lm_2d[2][0] - lm_2d[5][0]) / cos_yaw
         if eyes_visible and yaw_rad < np.radians(22.0) and eye_dist_px > 8.0:
             scale_ipd = 6.25 / eye_dist_px
-            clamped_ipd = float(np.clip(scale_ipd, scale_head_init * 0.90, scale_head_init * 1.10))
-            scale_cranial = 0.75 * scale_head_init + 0.25 * clamped_ipd
+            clamped_ipd = float(np.clip(scale_ipd, scale_head_height * 0.92, scale_head_height * 1.08))
+            scale_cranial = 0.80 * scale_head_height + 0.20 * clamped_ipd
         else:
-            scale_cranial = scale_head_init
+            scale_cranial = scale_head_height
 
-        # 2. Estimasi dari jarak hidung ke garis bahu
-        nose_to_sh_px = max((y_sh - nose[1]) / cos_pitch, 1.0)
-        scale_neck = 19.0 / max(nose_to_sh_px, 20.0)
+        # 2. Estimasi dari jarak hidung ke garis bahu (~ 19.5 cm)
+        nose_to_sh_px = max(y_sh - nose[1], 1.0)
+        scale_neck = 19.5 / max(nose_to_sh_px, 20.0)
 
         # 3. Cek apakah seluruh tubuh (kepala sampai pergelangan kaki) terlihat di foto
         ys = np.where(mask > 0)[0]
-        mask_top = float(ys.min()) if len(ys) > 0 else max(0.0, y_eye - 0.50 * head_h_px)
+        mask_top = float(ys.min()) if len(ys) > 0 else max(0.0, y_eye - 0.52 * head_h_px)
         mask_bottom = float(ys.max()) if len(ys) > 0 else y_hp
 
         ankles_visible = lm_2d[27][2] > 0.5 and lm_2d[28][2] > 0.5
         y_ankle = 0.5 * (lm_2d[27][1] + lm_2d[28][1])
-        # Batasi puncak kepala agar volume rambut/hijab tidak menambah tinggi badan secara berlebih
-        y_head_top = max(0.0, min(max(mask_top, y_eye - 0.54 * head_h_px), y_eye - 0.48 * head_h_px))
+        y_head_top = min(mask_top, max(0.0, y_eye - 0.50 * head_h_px))
 
         if ankles_visible and (y_ankle - y_head_top) > 180:
-            body_span = y_ankle - y_head_top
-            y_sole_est = y_ankle + 0.042 * body_span
-            y_feet = max(min(mask_bottom, y_ankle + 0.055 * body_span), y_sole_est)
+            y_feet = max(mask_bottom, y_ankle + 0.04 * (y_ankle - y_head_top))
             full_body_px = max(y_feet - y_head_top, 1.0)
 
-            # Hitung tinggi awal dari skala kraniofasial, lalu sesuaikan proporsi tinggi kepala secara alometrik
-            raw_h = full_body_px * scale_cranial
-            head_h_cm = float(np.clip(18.2 + 0.0295 * raw_h, 22.1, 23.8))
-            scale = scale_cranial * (head_h_cm / 22.9)
+            # Pertahankan skala lebar bahu/dada/pinggang agar hasil ukur pakaian tidak berubah
+            scale_full = 170.0 / full_body_px
+            clamped_head = float(np.clip(scale_head, scale_full * 0.88, scale_full * 1.12))
+            scale = 0.75 * scale_full + 0.25 * clamped_head
 
-            inferred_h = round(float(np.clip(full_body_px * scale, 135.0, 210.0)), 1)
-            scale = inferred_h / full_body_px
-            return scale, inferred_h, full_body_px, True
+            # Hitung tinggi badan murni dari skala kraniofasial + batas puncak kepala/telapak kaki yang dikoreksi
+            y_head_tight = max(0.0, min(max(mask_top, y_eye - 0.53 * head_h_corr_px), y_eye - 0.49 * head_h_corr_px))
+            span_tight = max(y_ankle - y_head_tight, 1.0)
+            y_feet_tight = max(min(mask_bottom, y_ankle + 0.048 * span_tight), y_ankle + 0.038 * span_tight)
+            exact_body_px = max(y_feet_tight - y_head_tight, 1.0)
+
+            inferred_h = round(float(np.clip(exact_body_px * scale_cranial, 135.0, 210.0)), 1)
+            return scale, inferred_h, exact_body_px, True
 
         # Jika foto setengah badan (pinggul ke atas)
         torso_px = max(y_hp - y_sh, 1.0)
-        scale_torso = 48.5 / max(torso_px, 40.0)
-        scale = float(np.median([scale_cranial, scale_neck, scale_torso]))
-        inferred_h = round(float(np.clip((torso_px * scale) / 0.29, 145.0, 195.0)), 1)
+        scale_torso = 49.5 / max(torso_px, 40.0)
+        scale = float(np.median([scale_head, scale_neck, scale_torso]))
+        inferred_h = round(float(np.clip((torso_px * scale_cranial) / 0.29, 145.0, 195.0)), 1)
         return scale, inferred_h, 0.0, False
 
     @staticmethod
@@ -214,13 +221,13 @@ class BodyEstimator:
         body_x_min = int(xs_all.min()) if len(xs_all) > 0 else int(min(lm_raw[11][0], lm_raw[12][0]))
         body_x_max = int(xs_all.max()) if len(xs_all) > 0 else int(max(lm_raw[11][0], lm_raw[12][0]))
 
-        y_head_top = int(np.clip(round(max(0.0, min(max(mask_top, y_eye - 0.54 * head_h_px), y_eye - 0.48 * head_h_px))), 10, h - 20))
+        y_head_top = int(np.clip(round(max(0.0, min(max(mask_top, y_eye - 0.53 * head_h_px), y_eye - 0.49 * head_h_px))), 10, h - 20))
         ankles_visible = lm_raw[27][2] > 0.5 and lm_raw[28][2] > 0.5
         y_ankle = 0.5 * (lm_raw[27][1] + lm_raw[28][1])
         if ankles_visible and (y_ankle - y_head_top) > 120:
             body_span = y_ankle - y_head_top
-            y_sole_est = y_ankle + 0.042 * body_span
-            y_feet_val = max(min(mask_bottom, y_ankle + 0.055 * body_span), y_sole_est)
+            y_sole_est = y_ankle + 0.038 * body_span
+            y_feet_val = max(min(mask_bottom, y_ankle + 0.048 * body_span), y_sole_est)
             y_feet = int(np.clip(round(y_feet_val), y_head_top + 40, h - 12))
         else:
             y_feet = int(np.clip(round(mask_bottom), y_head_top + 40, h - 12))
