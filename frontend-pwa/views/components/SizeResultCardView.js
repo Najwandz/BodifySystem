@@ -4,12 +4,30 @@ export function renderSizeResultCard(data) {
   const pose = data.info_pose || {};
   const catatan = (sewa.catatan_penyesuaian || []).map((c) => `<li>${c}</li>`).join("");
 
+  const tinggiBadan = m.tinggi_badan ?? data.estimasi_tinggi_otomatis_cm;
+  const hasTinggi = typeof tinggiBadan === "number" && tinggiBadan > 0;
   const hasExtraMetrics = typeof m.lingkar_pinggul === "number" && m.lingkar_pinggul > 0;
 
   return `
     <div class="card">
       <div class="card-title">✅ Hasil Estimasi Ukuran Tubuh</div>
+      ${
+        data.foto_anotasi_base64
+          ? `<div style="margin-bottom:12px;text-align:center;">
+              <img src="${data.foto_anotasi_base64}" alt="Hasil Pengukuran Tubuh" style="width:100%;max-height:460px;object-fit:contain;border-radius:10px;border:1px solid #e2e8f0;background:#0f172a;" />
+            </div>`
+          : ""
+      }
       <div class="metric-grid">
+        ${
+          hasTinggi
+            ? `<div class="metric-box">
+                <div class="metric-label">Tinggi Badan</div>
+                <div class="metric-val">${tinggiBadan}</div>
+                <div class="metric-unit">cm</div>
+              </div>`
+            : ""
+        }
         <div class="metric-box">
           <div class="metric-label">Lebar Bahu</div>
           <div class="metric-val">${m.lebar_bahu}</div>

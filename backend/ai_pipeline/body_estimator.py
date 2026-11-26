@@ -1,4 +1,5 @@
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
+import cv2
 import numpy as np
 
 from ai_pipeline.ellipse_geometry import (
@@ -56,7 +57,7 @@ class BodyEstimator:
     def _estimate_invariant_scale(
         lm_2d: Dict[int, Tuple[float, float, float]],
         mask: np.ndarray,
-    ) -> Tuple[float, float]:
+    ) -> Tuple[float, float, float, bool]:
         """
         Menghitung skala cm/px HANYA dari referensi vertikal & ukuran kepala yang konsisten
         pada semua ukuran tubuh (S, M, L, XL, XXL), tanpa membatasi lebar bahu/dada.
@@ -94,14 +95,14 @@ class BodyEstimator:
             clamped_head = float(np.clip(scale_head, scale_full * 0.88, scale_full * 1.12))
             scale = 0.75 * scale_full + 0.25 * clamped_head
             inferred_h = round(full_body_px * scale, 1)
-            return scale, inferred_h
+            return scale, inferred_h, full_body_px, True
 
         # Jika foto setengah badan (pinggul ke atas)
         torso_px = max(y_hp - y_sh, 1.0)
         scale_torso = 49.5 / max(torso_px, 40.0)
         scale = float(np.median([scale_head, scale_neck, scale_torso]))
         inferred_h = round(float(np.clip((torso_px * scale) / 0.29, 150.0, 190.0)), 1)
-        return scale, inferred_h
+        return scale, inferred_h, 0.0, False
 
     @staticmethod
     def _detect_crossed_arms(lm_2d: Dict[int, Tuple[float, float, float]]) -> bool:
@@ -120,6 +121,182 @@ class BodyEstimator:
                 return True
         return False
 
+    @staticmethod
+    def _draw_label_box(
+        canvas: np.ndarray,
+        text: str,
+        x: int,
+        y: int,
+        font_scale: float,
+        thickness: int,
+        bg_color: Tuple[int, int, int] = (15, 23, 42),
+        text_color: Tuple[int, int, int] = (255, 255, 255),
+        border_color: Optional[Tuple[int, int, int]] = None,
+    ) -> None:
+        h, w = canvas.shape[:2]
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        (tw, th), baseline = cv2.getTextSize(text, font, font_scale, thickness)
+        pad_x = max(8, int(round(8 * font_scale / 0.55)))
+        pad_y = max(5, int(round(5 * font_scale / 0.55)))
+
+        box_w = tw + 2 * pad_x
+        box_h = th + baseline + 2 * pad_y
+
+        x1 = int(np.clip(x, 6, max(6, w - box_w - 6)))
+        y1 = int(np.clip(y - box_h + pad_y, 6, max(6, h - box_h - 6)))
+        x2 = min(w - 6, x1 + box_w)
+        y2 = min(h - 6, y1 + box_h)
+
+        overlay = canvas.copy()
+        cv2.rectangle(overlay, (x1, y1), (x2, y2), bg_color, -1)
+        cv2.addWeighted(overlay, 0.78, canvas, 0.22, 0, canvas)
+
+        if border_color is not None:
+            cv2.rectangle(canvas, (x1, y1), (x2, y2), border_color, max(1, thickness - 1))
+
+        cv2.putText(
+            canvas,
+            text,
+            (x1 + pad_x, y2 - pad_y - baseline // 2),
+            font,
+            font_scale,
+            text_color,
+            thickness,
+            cv2.LINE_AA,
+        )
+
+    def draw_measurement_overlay(
+        self,
+        front_bgr: np.ndarray,
+        measurements: Dict[str, float],
+        inferred_height_cm: float,
+        rekomendasi_ukuran: str = "-",
+        pose_info: Optional[Dict] = None,
+    ) -> np.ndarray:
+        """Menggambar garis ukur tinggi badan, ukuran baju, rekomendasi, dan panduan cara memfoto pada foto."""
+        canvas = front_bgr.copy()
+        h, w = canvas.shape[:2]
+        scale_ui = max(h / 920.0, 0.55)
+        line_thick = max(2, int(round(2.4 * scale_ui)))
+        font_scale = 0.56 * scale_ui
+        small_scale = 0.46 * scale_ui
+
+        lm_raw, _, mask_raw, _ = self.segmenter.extract_full(front_bgr)
+
+        y_eye = 0.5 * (lm_raw[2][1] + lm_raw[5][1])
+        y_mouth = 0.5 * (lm_raw[9][1] + lm_raw[10][1])
+        head_h_px = max((y_mouth - y_eye) / 0.32, 20.0)
+
+        ys = np.where(mask_raw > 0)[0]
+        xs_all = np.where(mask_raw > 0)[1]
+        mask_top = float(ys.min()) if len(ys) > 0 else max(0.0, y_eye - 0.52 * head_h_px)
+        mask_bottom = float(ys.max()) if len(ys) > 0 else float(h - 20)
+        body_x_min = int(xs_all.min()) if len(xs_all) > 0 else int(min(lm_raw[11][0], lm_raw[12][0]))
+        body_x_max = int(xs_all.max()) if len(xs_all) > 0 else int(max(lm_raw[11][0], lm_raw[12][0]))
+
+        y_head_top = int(np.clip(round(min(mask_top, max(0.0, y_eye - 0.50 * head_h_px))), 10, h - 20))
+        ankles_visible = lm_raw[27][2] > 0.5 and lm_raw[28][2] > 0.5
+        y_ankle = 0.5 * (lm_raw[27][1] + lm_raw[28][1])
+        if ankles_visible and (y_ankle - y_head_top) > 120:
+            y_feet = int(np.clip(round(max(mask_bottom, y_ankle + 0.04 * (y_ankle - y_head_top))), y_head_top + 40, h - 12))
+        else:
+            y_feet = int(np.clip(round(mask_bottom), y_head_top + 40, h - 12))
+
+        def _slice_bounds(y_val: float, fallback_x1: float, fallback_x2: float) -> Tuple[int, int]:
+            ry = int(np.clip(round(y_val), 0, h - 1))
+            row_xs = np.where(mask_raw[ry] > 0)[0]
+            if len(row_xs) > 4:
+                return int(row_xs.min()), int(row_xs.max())
+            return int(min(fallback_x1, fallback_x2)), int(max(fallback_x1, fallback_x2))
+
+        y_sh = 0.5 * (lm_raw[11][1] + lm_raw[12][1])
+        y_hp = 0.5 * (lm_raw[23][1] + lm_raw[24][1])
+        torso_h = max(y_hp - y_sh, 1.0)
+        y_chest = y_sh + 0.28 * torso_h
+        y_waist = y_sh + 0.68 * torso_h
+
+        sh_x1, sh_x2 = _slice_bounds(y_sh + 0.04 * torso_h, lm_raw[11][0], lm_raw[12][0])
+        ch_x1, ch_x2 = _slice_bounds(y_chest, lm_raw[11][0], lm_raw[12][0])
+        wa_x1, wa_x2 = _slice_bounds(y_waist, lm_raw[23][0], lm_raw[24][0])
+
+        # 1. Garis ukur vertikal Tinggi Badan (kepala sampai kaki)
+        margin_side = max(18, int(round(22 * scale_ui)))
+        if body_x_min > margin_side + 30:
+            x_height = max(16, body_x_min - margin_side)
+        else:
+            x_height = min(w - 16, body_x_max + margin_side)
+
+        color_height = (255, 229, 0)  # Cyan terang (BGR)
+        cap_half = max(10, int(round(12 * scale_ui)))
+        cv2.line(canvas, (x_height, y_head_top), (x_height, y_feet), color_height, line_thick, cv2.LINE_AA)
+        cv2.line(canvas, (x_height - cap_half, y_head_top), (x_height + cap_half, y_head_top), color_height, line_thick, cv2.LINE_AA)
+        cv2.line(canvas, (x_height - cap_half, y_feet), (x_height + cap_half, y_feet), color_height, line_thick, cv2.LINE_AA)
+
+        tinggi_val = measurements.get("tinggi_badan", inferred_height_cm)
+        y_mid_height = int(0.5 * (y_head_top + y_feet))
+        self._draw_label_box(
+            canvas,
+            f"Tinggi: {tinggi_val} cm",
+            x_height + 8 if x_height < w // 2 else x_height - int(190 * scale_ui),
+            y_mid_height,
+            font_scale,
+            line_thick,
+            border_color=color_height,
+        )
+
+        # 2. Garis ukur baju (Bahu, Dada, Pinggang)
+        garment_lines = [
+            (int(round(y_sh)), sh_x1, sh_x2, f"Bahu: {measurements['lebar_bahu']} cm", (80, 220, 100)),
+            (int(round(y_chest)), ch_x1, ch_x2, f"Dada: {measurements['lingkar_dada']} cm", (60, 185, 255)),
+            (int(round(y_waist)), wa_x1, wa_x2, f"Pinggang: {measurements['lingkar_pinggang']} cm", (245, 165, 66)),
+        ]
+        for gy, gx1, gx2, glabel, gcolor in garment_lines:
+            gy = int(np.clip(gy, 12, h - 12))
+            cv2.line(canvas, (gx1, gy), (gx2, gy), gcolor, line_thick, cv2.LINE_AA)
+            cv2.circle(canvas, (gx1, gy), max(4, line_thick + 1), gcolor, -1, cv2.LINE_AA)
+            cv2.circle(canvas, (gx2, gy), max(4, line_thick + 1), gcolor, -1, cv2.LINE_AA)
+            self._draw_label_box(
+                canvas,
+                glabel,
+                int(0.5 * (gx1 + gx2)) - int(70 * scale_ui),
+                gy - 6,
+                small_scale,
+                max(1, line_thick - 1),
+                border_color=gcolor,
+            )
+
+        # 3. Label Rekomendasi Ukuran di bagian atas foto
+        self._draw_label_box(
+            canvas,
+            f"Rekomendasi: Size {rekomendasi_ukuran} | Tinggi {tinggi_val} cm",
+            12,
+            int(34 * scale_ui),
+            font_scale,
+            line_thick,
+            bg_color=(29, 78, 216),
+            border_color=(147, 197, 253),
+        )
+
+        # 4. Teks contoh cara memfoto di bagian bawah foto agar sesuai rekomendasi
+        full_ok = bool((pose_info or {}).get("seluruh_tubuh_terlihat", ankles_visible))
+        if full_ok:
+            guide_text = "Cara Foto: Kepala-kaki masuk frame, berdiri tegak, lengan lurus"
+        else:
+            guide_text = "Cara Foto: Mundur agar kepala-kaki masuk frame & lengan lurus"
+
+        self._draw_label_box(
+            canvas,
+            guide_text,
+            12,
+            h - 10,
+            small_scale,
+            max(1, line_thick - 1),
+            bg_color=(15, 23, 42),
+            border_color=(148, 163, 184),
+        )
+
+        return canvas
+
     def estimate_single_photo(
         self,
         front_bgr: np.ndarray,
@@ -134,10 +311,12 @@ class BodyEstimator:
         mask, lm, roll_deg = derotate_mask_and_landmarks(mask_raw, lm_raw)
         arms_crossed = self._detect_crossed_arms(lm)
 
-        scale_auto, inferred_height_cm = self._estimate_invariant_scale(lm, mask)
+        scale_auto, inferred_height_cm, full_body_px, full_body_visible = self._estimate_invariant_scale(lm, mask)
         if aruco_scale is not None:
             scale = aruco_scale
             scale_method = "ArUco Presisi Tinggi (±1–1.5 cm)"
+            if full_body_visible and full_body_px > 0:
+                inferred_height_cm = round(full_body_px * aruco_scale, 1)
         else:
             scale = scale_auto
             scale_method = "Otomatis Proporsi Vertikal & Kepala"
@@ -199,6 +378,7 @@ class BodyEstimator:
         circ_offset = CLOTHING_CIRCUMFERENCE_OFFSET_CM.get(cloth, 2.0)
 
         result = {
+            "tinggi_badan": round(inferred_height_cm, 1),
             "lebar_bahu": round(max(32.0, raw_bahu - sh_offset), 1),
             "lingkar_dada": round(max(72.0, raw_dada - circ_offset), 1),
             "lingkar_pinggang": round(max(58.0, raw_pinggang - circ_offset), 1),
@@ -211,6 +391,8 @@ class BodyEstimator:
             notes.append(f"miring {abs(roll_deg)}° diluruskan")
         if arms_crossed:
             notes.append("tangan bersedekap dikoreksi (luruskan lengan di samping untuk akurasi maksimal)")
+        if not full_body_visible:
+            notes.append("tampilkan seluruh badan dari kepala hingga kaki untuk akurasi tinggi badan")
 
         status_pose = "Tegak lurus" if not notes else " • ".join(notes).capitalize()
 
@@ -221,6 +403,7 @@ class BodyEstimator:
             "sudut_condong_derajat": pitch_deg,
             "metode_skala": scale_method,
             "aruco_terdeteksi": aruco_scale is not None,
+            "seluruh_tubuh_terlihat": full_body_visible,
         }
 
         return result, inferred_height_cm, pose_info

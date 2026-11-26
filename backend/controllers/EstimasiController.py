@@ -1,3 +1,4 @@
+import base64
 from typing import Optional
 import cv2
 import numpy as np
@@ -18,6 +19,14 @@ def _decode_image(raw_bytes: bytes) -> np.ndarray:
     if img is None:
         raise HTTPException(status_code=400, detail="File gambar tidak valid atau rusak.")
     return img
+
+
+def _encode_image_base64(img_bgr: np.ndarray) -> str:
+    ok, buf = cv2.imencode(".jpg", img_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
+    if not ok:
+        return ""
+    b64 = base64.b64encode(buf.tobytes()).decode("ascii")
+    return f"data:image/jpeg;base64,{b64}"
 
 
 def proses_estimasi(
@@ -100,6 +109,14 @@ def proses_estimasi_satu_foto(
         raise HTTPException(status_code=422, detail=str(err))
 
     size_match = match_with_catalog(db, measurements, kategori=kategori_sewa)
+    annotated_bgr = _estimator.draw_measurement_overlay(
+        front_bgr,
+        measurements,
+        inferred_height,
+        rekomendasi_ukuran=size_match.get("rekomendasi_ukuran", "-"),
+        pose_info=pose_info,
+    )
+    annotated_b64 = _encode_image_base64(annotated_bgr)
 
     saved_id = None
     pelanggan_id = None
@@ -143,4 +160,5 @@ def proses_estimasi_satu_foto(
         "info_pose": pose_info,
         "estimasi_ukuran_cm": measurements,
         "pencocokan_sewa": size_match,
+        "foto_anotasi_base64": annotated_b64,
     }
